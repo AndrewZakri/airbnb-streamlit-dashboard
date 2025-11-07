@@ -19,6 +19,46 @@ load_dotenv()  # Loads .env locally
 # Config variables (from .env or Streamlit secrets)
 # -------------------------------------------------
 MONGODB_URI = os.getenv("MONGODB_URI") or st.secrets.get("MONGODB_URI")
+DB_NAME = (os.getenv("DB_NAME") or st.secrets.get("DB_NAME")) or "sample_airbnb"
+COLL_NAME = (os.getenv("COLL_NAME") or st.secrets.get("COLL_NAME")) or "listingsAndReviews"
+
+if not MONGODB_URI:
+    st.error("❌ Missing MONGODB_URI. Add it to your .env or Streamlit Secrets.")
+    st.stop()
+
+# -------------------------------------------------
+# MongoDB connection (cache_resource = ✅ serializable)
+# -------------------------------------------------
+@st.cache_resource
+def get_client():
+    return MongoClient(MONGODB_URI, tls=True)
+
+# Optional: upfront connectivity check (shows nice error instead of redaction)
+try:
+    _ = get_client().admin.command("ping")
+except Exception as e:
+    st.error("Could not connect to MongoDB. Check firewall/IP allowlist and
+import os
+import math
+from functools import lru_cache
+
+import streamlit as st
+from dotenv import load_dotenv
+from pymongo import MongoClient
+import pandas as pd
+import numpy as np
+import plotly.express as px
+
+# -------------------------------------------------
+# Streamlit page setup
+# -------------------------------------------------
+st.set_page_config(page_title="Airbnb Insights", page_icon="🏠", layout="wide")
+load_dotenv()  # Loads .env locally
+
+# -------------------------------------------------
+# Config variables (from .env or Streamlit secrets)
+# -------------------------------------------------
+MONGODB_URI = os.getenv("MONGODB_URI") or st.secrets.get("MONGODB_URI")
 DB_NAME = os.getenv("DB_NAME", "sample_airbnb") or st.secrets.get("DB_NAME", "sample_airbnb")
 COLL_NAME = os.getenv("COLL_NAME", "listingsAndReviews") or st.secrets.get("COLL_NAME", "listingsAndReviews")
 
