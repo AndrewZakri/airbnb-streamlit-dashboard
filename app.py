@@ -26,13 +26,13 @@ if not MONGODB_URI:
     st.stop()
 
 # -------------------------------------------------
-# MongoDB connection (cache_resource = ✅ for non-serializable objects)
+# MongoDB connection (cache_resource for non-serializable objects)
 # -------------------------------------------------
 @st.cache_resource
 def get_client():
     return MongoClient(MONGODB_URI, tls=True)
 
-# Optional: upfront connectivity check (shows clear error instead of redaction)
+# Optional: upfront connectivity check
 try:
     _ = get_client().admin.command("ping")
 except Exception as e:
@@ -66,7 +66,6 @@ def fetch_price_bounds(country: str | None, market: str | None):
 
     pipeline = [
         {"$match": q},
-        # Normalize price to double; drop anything non-coercible
         {"$project": {
             "p": {
                 "$convert": {"input": "$price", "to": "double", "onError": None, "onNull": None}
@@ -77,11 +76,9 @@ def fetch_price_bounds(country: str | None, market: str | None):
     ]
 
     agg = list(col.aggregate(pipeline))
-    # If no numeric prices for current filter combo, provide sane defaults
     if not agg or agg[0].get("minp") is None or agg[0].get("maxp") is None:
         return 0, 2000
 
-    # Safe float cast
     try:
         minp_f = float(agg[0]["minp"])
     except Exception:
@@ -91,7 +88,6 @@ def fetch_price_bounds(country: str | None, market: str | None):
     except Exception:
         maxp_f = max(minp_f, 1.0)
 
-    # Ensure usable ordering and integers for the slider
     if not (maxp_f > minp_f):
         maxp_f = minp_f + 1.0
 
@@ -157,19 +153,16 @@ market_val = None if market == "(All)" else market
 
 minp, maxp = fetch_price_bounds(country_val, market_val)
 
-# Defensive slider (avoids errors if bounds collapse)
+# Defensive bounds
 if maxp <= minp:
     maxp = minp + 1
 
-# Choose safe defaults within [minp, maxp]
-low_default = max(minp, min(50, maxp - 1))
-high_default = max(low_default + 1, min(maxp, minp + 50))
-
+# 👉 Default to the full range so we don't over-filter by accident
 price_range = st.sidebar.slider(
     "Nightly Price (USD)",
     min_value=minp,
     max_value=maxp,
-    value=(low_default, high_default),
+    value=(minp, maxp),  # full range by default
     step=5
 )
 
@@ -188,6 +181,12 @@ filters = {
 df = fetch_summary(filters)
 st.title("🏠 Airbnb Insights Dashboard")
 st.caption("Connected to Azure Cosmos DB for MongoDB (vCore)")
+
+# Small debug peek to confirm rows/columns (you can collapse this)
+with st.expander("🔎 Debug (collapse me)"):
+    st.write("Rows returned:", len(df))
+    st.write("Columns:", list(df.columns))
+    st.dataframe(df.head(5), use_container_width=True)
 
 # KPIs
 col1, col2, col3, col4 = st.columns(4)
@@ -222,24 +221,38 @@ if all(c in df.columns for c in ["price", "rating", "accommodates"]):
         fig_scatter.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=350)
         st.plotly_chart(fig_scatter, use_container_width=True)
 
-# Market summary
-group_cols = [c for c in ["address.market", "address.country"] if c in df.columns]
-if group_cols:
-    g = (df.dropna(subset=["price"])
-           .groupby(group_cols)
-           .agg(listings=("name", "count"),
-                avg_price=("price", "mean"),
-                median_price=("price", "median"),
-                avg_rating=("rating", "mean"),
-                avg_reviews=("number_of_reviews", "mean"))
-           .reset_index()
-           .sort_values(by="listings", ascending=False))
+# ----- Market summary (robust) -----
+possible_groups = [c for c in ["address.market", "address.country"] if c in df.columns]
+if not possible_groups:
+    df["_group"] = "All"
+    group_cols = ["_group"]
+else:
+    group_cols = possible_groups
+
+if len(df) > 0:
+    temp = df.copy()
+    g = (temp.groupby(group_cols, dropna=False).agg(
+            listings=("name", "count"),
+            avg_price=("price", "mean"),
+            median_price=("price", "median"),
+            avg_rating=("rating", "mean"),
+            avg_reviews=("number_of_reviews", "mean")
+        ).reset_index())
+
     for c in ["avg_price", "median_price"]:
-        g[c] = g[c].round(0)
+        if c in g.columns:
+            g[c] = g[c].round(0)
     for c in ["avg_rating", "avg_reviews"]:
-        g[c] = g[c].round(1)
+        if c in g.columns:
+            g[c] = g[c].round(1)
+
+    if "listings" in g.columns:
+        g = g.sort_values(by="listings", ascending=False)
+
     st.subheader("Market Summary")
     st.dataframe(g, use_container_width=True, height=320)
+else:
+    st.info("No rows match the current filters to summarize.")
 
 # Map
 if all(c in df.columns for c in ["lat", "lon"]):
