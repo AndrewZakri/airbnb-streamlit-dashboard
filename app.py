@@ -37,17 +37,9 @@ def get_client():
 try:
     _ = get_client().admin.command("ping")
 except Exception as e:
-    st.error("Could not connect to MongoDB. Check firewall/IP allowlist and
-import os
-import math
-from functools import lru_cache
-
-import streamlit as st
-from dotenv import load_dotenv
-from pymongo import MongoClient
-import pandas as pd
-import numpy as np
-import plotly.express as px
+    st.error("Could not connect to MongoDB. Check firewall/IP allowlist and MONGODB_URI.")
+    st.exception(e)
+    st.stop()
 
 # -------------------------------------------------
 # Streamlit page setup
