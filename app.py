@@ -165,4 +165,4 @@ minp, maxp = fetch_price_bounds(country_val, market_val)
 # Defensive slider (avoids errors if bounds collapse)
 if maxp <= minp:
     
-::contentReference[oaicite:0]{index=0}
+
