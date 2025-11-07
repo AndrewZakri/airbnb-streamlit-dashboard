@@ -1,6 +1,5 @@
 import os
 import math
-from functools import lru_cache
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -27,13 +26,13 @@ if not MONGODB_URI:
     st.stop()
 
 # -------------------------------------------------
-# MongoDB connection (cache_resource = ✅ serializable)
+# MongoDB connection (cache_resource = ✅ for non-serializable objects)
 # -------------------------------------------------
 @st.cache_resource
 def get_client():
     return MongoClient(MONGODB_URI, tls=True)
 
-# Optional: upfront connectivity check
+# Optional: upfront connectivity check (shows clear error instead of redaction)
 try:
     _ = get_client().admin.command("ping")
 except Exception as e:
@@ -70,12 +69,7 @@ def fetch_price_bounds(country: str | None, market: str | None):
         # Normalize price to double; drop anything non-coercible
         {"$project": {
             "p": {
-                "$convert": {
-                    "input": "$price",
-                    "to": "double",
-                    "onError": None,
-                    "onNull": None
-                }
+                "$convert": {"input": "$price", "to": "double", "onError": None, "onNull": None}
             }
         }},
         {"$match": {"p": {"$ne": None}}},
@@ -162,7 +156,111 @@ market = st.sidebar.selectbox("Market / City", market_options)
 market_val = None if market == "(All)" else market
 
 minp, maxp = fetch_price_bounds(country_val, market_val)
-# Defensive slider (avoids errors if bounds collapse)
-        if maxp <= minp:
-    
 
+# Defensive slider (avoids errors if bounds collapse)
+if maxp <= minp:
+    maxp = minp + 1
+
+# Choose safe defaults within [minp, maxp]
+low_default = max(minp, min(50, maxp - 1))
+high_default = max(low_default + 1, min(maxp, minp + 50))
+
+price_range = st.sidebar.slider(
+    "Nightly Price (USD)",
+    min_value=minp,
+    max_value=maxp,
+    value=(low_default, high_default),
+    step=5
+)
+
+min_bedrooms = st.sidebar.number_input("Min bedrooms", min_value=0, max_value=10, value=0, step=1)
+
+filters = {
+    "country": country_val,
+    "market": market_val,
+    "price_range": price_range,
+    "min_bedrooms": int(min_bedrooms)
+}
+
+# -------------------------------------------------
+# Main dashboard body
+# -------------------------------------------------
+df = fetch_summary(filters)
+st.title("🏠 Airbnb Insights Dashboard")
+st.caption("Connected to Azure Cosmos DB for MongoDB (vCore)")
+
+# KPIs
+col1, col2, col3, col4 = st.columns(4)
+total_listings = int(len(df))
+avg_price = float(df["price"].dropna().mean()) if "price" in df else float("nan")
+avg_rating = float(df["rating"].dropna().mean()) if "rating" in df else float("nan")
+avg_reviews = float(df["number_of_reviews"].dropna().mean()) if "number_of_reviews" in df else float("nan")
+
+col1.metric("Listings", f"{total_listings:,}")
+col2.metric("Avg Price", f"${avg_price:,.0f}" if not math.isnan(avg_price) else "—")
+col3.metric("Avg Rating", f"{avg_rating:,.1f}" if not math.isnan(avg_rating) else "—")
+col4.metric("Avg #Reviews", f"{avg_reviews:,.1f}" if not math.isnan(avg_reviews) else "—")
+
+st.divider()
+
+# Price distribution
+if "price" in df.columns and len(df.dropna(subset=["price"])) > 0:
+    fig_price = px.histogram(df, x="price", nbins=40, title="Price Distribution")
+    fig_price.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=300)
+    st.plotly_chart(fig_price, use_container_width=True)
+
+# Rating vs Price
+if all(c in df.columns for c in ["price", "rating", "accommodates"]):
+    scatter_df = df.dropna(subset=["price", "rating"]).copy()
+    if len(scatter_df) > 0:
+        fig_scatter = px.scatter(
+            scatter_df.sample(min(2000, len(scatter_df))),
+            x="rating", y="price", size="accommodates",
+            hover_data=["name", "address.market", "bedrooms"],
+            title="Price vs. Rating (bubble = accommodates)"
+        )
+        fig_scatter.update_layout(margin=dict(l=0, r=0, t=40, b=0), height=350)
+        st.plotly_chart(fig_scatter, use_container_width=True)
+
+# Market summary
+group_cols = [c for c in ["address.market", "address.country"] if c in df.columns]
+if group_cols:
+    g = (df.dropna(subset=["price"])
+           .groupby(group_cols)
+           .agg(listings=("name", "count"),
+                avg_price=("price", "mean"),
+                median_price=("price", "median"),
+                avg_rating=("rating", "mean"),
+                avg_reviews=("number_of_reviews", "mean"))
+           .reset_index()
+           .sort_values(by="listings", ascending=False))
+    for c in ["avg_price", "median_price"]:
+        g[c] = g[c].round(0)
+    for c in ["avg_rating", "avg_reviews"]:
+        g[c] = g[c].round(1)
+    st.subheader("Market Summary")
+    st.dataframe(g, use_container_width=True, height=320)
+
+# Map
+if all(c in df.columns for c in ["lat", "lon"]):
+    geo_df = df.dropna(subset=["lat", "lon"]).copy()
+    if len(geo_df) > 0:
+        st.subheader("Map of Listings")
+        map_sample = geo_df.sample(min(len(geo_df), 3000))
+        fig_map = px.scatter_mapbox(
+            map_sample,
+            lat="lat", lon="lon",
+            hover_name="name",
+            hover_data={"price": True, "rating": True, "address.market": True, "lat": False, "lon": False},
+            zoom=1, height=500
+        )
+        fig_map.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0))
+        st.plotly_chart(fig_map, use_container_width=True)
+
+# Notes
+with st.expander("ℹ️ Data & Method Notes"):
+    st.markdown("""
+- Data: `sample_airbnb.listingsAndReviews` (Cosmos DB for MongoDB vCore)
+- Filters run server-side; visuals aggregate client-side.
+- Coordinates `[lon, lat]` converted to `lat/lon` for map.
+""")
